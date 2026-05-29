@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import Link from "next/link";
 import {
   Home,
@@ -18,34 +18,17 @@ import {
   Mail,
   Clock,
   X,
-  ExternalLink,
-  AlertCircle,
-  Star,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { DashboardHeader } from "@/components/dashboard-header";
 import { leaseDetails } from "@/lib/mockData/leaseData";
-import {
-  getLease,
-  getLeaseSignUrl,
-  type LeaseAgreement,
-} from "@/lib/leaseApi";
 import {
   leaseAgreement,
   propertyInspectionReport,
   paymentSchedule,
   houseRules,
 } from "@/lib/mockData/documents";
-
-const LEASE_STATUS_LABELS: Record<string, { label: string; variant: string }> = {
-  draft: { label: "Draft", variant: "secondary" },
-  pending_tenant_signature: { label: "Awaiting Your Signature", variant: "destructive" },
-  pending_landlord_signature: { label: "Awaiting Landlord", variant: "secondary" },
-  fully_signed: { label: "Fully Signed", variant: "default" },
-  voided: { label: "Voided", variant: "outline" },
-};
 
 export default function TenantLeasePage() {
   const [selectedDocument, setSelectedDocument] = useState<
@@ -55,28 +38,6 @@ export default function TenantLeasePage() {
     | typeof houseRules
     | null
   >(null);
-  const [leaseAgreementData, setLeaseAgreementData] = useState<LeaseAgreement | null>(null);
-  const [isSigning, setIsSigning] = useState(false);
-
-  const dealId = "current-deal";
-
-  useEffect(() => {
-    getLease(dealId)
-      .then((res) => setLeaseAgreementData(res.data))
-      .catch(() => setLeaseAgreementData(null));
-  }, [dealId]);
-
-  const handleSign = async () => {
-    setIsSigning(true);
-    try {
-      const result = await getLeaseSignUrl(dealId);
-      window.open(result.data.url, "_blank");
-    } catch (error) {
-      console.error("Failed to get signing URL:", error);
-    } finally {
-      setIsSigning(false);
-    }
-  };
 
   const formatCurrency = (amount: number) => {
     return new Intl.NumberFormat("en-NG", {
@@ -135,13 +96,6 @@ export default function TenantLeasePage() {
               Payments
             </Link>
             <Link
-              href="/dashboard/tenant/rating-card"
-              className="flex items-center gap-3 border-3 border-foreground bg-card p-3 font-bold transition-all hover:bg-muted hover:shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
-            >
-              <Star className="h-5 w-5" />
-              Rating Card
-            </Link>
-            <Link
               href="/dashboard/tenant/lease"
               className="flex items-center gap-3 border-3 border-foreground bg-primary p-3 font-bold shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]"
             >
@@ -192,61 +146,6 @@ export default function TenantLeasePage() {
               Active Lease
             </div>
           </div>
-
-          {/* Lease Signing Status */}
-          {leaseAgreementData && (
-            <Card className="border-3 border-foreground p-6 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)] mb-6">
-              <div className="flex items-center justify-between mb-4">
-                <div>
-                  <h3 className="font-bold text-lg">Digital Lease Agreement</h3>
-                  <p className="text-sm text-muted-foreground">
-                    E-signature status for your rental agreement
-                  </p>
-                </div>
-                <Badge
-                  variant={LEASE_STATUS_LABELS[leaseAgreementData.status]?.variant as any || "secondary"}
-                  className="border-2 border-foreground font-bold"
-                >
-                  {LEASE_STATUS_LABELS[leaseAgreementData.status]?.label || leaseAgreementData.status}
-                </Badge>
-              </div>
-
-              <div className="flex items-center gap-4">
-                <div className="flex items-center gap-2">
-                  <div className={`h-3 w-3 border border-foreground ${leaseAgreementData.tenantSignedAt ? 'bg-primary' : 'bg-muted'}`} />
-                  <span className="text-sm">Your signature: {leaseAgreementData.tenantSignedAt ? 'Signed' : 'Pending'}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <div className={`h-3 w-3 border border-foreground ${leaseAgreementData.landlordSignedAt ? 'bg-primary' : 'bg-muted'}`} />
-                  <span className="text-sm">Landlord: {leaseAgreementData.landlordSignedAt ? 'Signed' : 'Pending'}</span>
-                </div>
-              </div>
-
-              {leaseAgreementData.status === "pending_tenant_signature" && (
-                <div className="mt-4 flex items-center justify-between border-3 border-foreground bg-destructive/10 p-4">
-                  <div className="flex items-center gap-2">
-                    <AlertCircle className="h-5 w-5 text-destructive" />
-                    <span className="font-bold">Action Required: Please sign your lease</span>
-                  </div>
-                  <Button
-                    onClick={handleSign}
-                    disabled={isSigning}
-                    className="border-2 border-foreground bg-primary font-bold shadow-[2px_2px_0px_0px_rgba(26,26,26,1)]"
-                  >
-                    <ExternalLink className="mr-2 h-4 w-4" />
-                    {isSigning ? "Loading..." : "Sign Now"}
-                  </Button>
-                </div>
-              )}
-
-              {leaseAgreementData.status === "fully_signed" && (
-                <div className="mt-4 flex items-center gap-2 border-3 border-foreground bg-primary/10 p-4">
-                  <CheckCircle className="h-5 w-5 text-primary" />
-                  <span className="font-bold">Lease fully signed and active</span>
-                </div>
-              )}
-            </Card>
-          )}
 
           <div className="grid gap-6 lg:grid-cols-3">
             {/* Property Details */}

@@ -13,18 +13,36 @@ import {
 } from "@/lib/notificationsApi";
 import { cn } from "@/lib/utils";
 
+const CATEGORIES = [
+  { value: "", label: "All" },
+  { value: "unread", label: "Unread" },
+  { value: "deal_update", label: "Deals" },
+  { value: "payment_due", label: "Payments" },
+  { value: "kyc_update", label: "KYC" },
+  { value: "dispute_update", label: "Disputes" },
+  { value: "reward_validated", label: "Rewards" },
+  { value: "inspection_assigned", label: "Inspections" },
+];
+
 export default function NotificationsPage() {
   const [items, setItems] = useState<NotificationItem[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [optimistic, setOptimistic] = useState<Set<string>>(new Set());
+  const [filter, setFilter] = useState("");
 
-  const load = useCallback(async (cursor?: string) => {
+  const load = useCallback(async (cursor?: string, filterValue?: string) => {
     setLoading(true);
     setErr(null);
     try {
-      const r = await fetchNotifications({ cursor, limit: 20 });
+      const params: Record<string, any> = { cursor, limit: 20 };
+      if (filterValue === "unread") {
+        params.read = false;
+      } else if (filterValue && filterValue !== "") {
+        params.category = filterValue;
+      }
+      const r = await fetchNotifications(params);
       setItems((prev) => (cursor ? [...prev, ...r.data.items] : r.data.items));
       setNextCursor(r.data.nextCursor);
     } catch (e) {
@@ -35,8 +53,10 @@ export default function NotificationsPage() {
   }, []);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    setItems([]);
+    setNextCursor(null);
+    void load(undefined, filter);
+  }, [filter, load]);
 
   const onRead = async (id: string) => {
     setOptimistic((o) => new Set(o).add(id));
@@ -90,6 +110,25 @@ export default function NotificationsPage() {
           </Button>
         </div>
         <h1 className="mb-6 font-mono text-2xl font-black">Notifications</h1>
+
+        {/* Filter Tabs */}
+        <div className="mb-6 flex gap-2 overflow-x-auto pb-2">
+          {CATEGORIES.map((cat) => (
+            <button
+              key={cat.value}
+              onClick={() => setFilter(cat.value)}
+              className={cn(
+                "whitespace-nowrap px-3 py-2 text-sm font-bold border-2 transition-colors",
+                filter === cat.value
+                  ? "border-foreground bg-primary text-foreground"
+                  : "border-foreground bg-transparent text-foreground hover:bg-primary/20"
+              )}
+            >
+              {cat.label}
+            </button>
+          ))}
+        </div>
+
         {err && (
           <p className="mb-4 text-sm text-destructive" role="alert">
             {err}

@@ -10,10 +10,12 @@ export type NotificationItem = {
   createdAt: string;
 };
 
-export async function fetchNotifications(params?: { cursor?: string; limit?: number }) {
+export async function fetchNotifications(params?: { cursor?: string; limit?: number; category?: string; read?: boolean }) {
   const sp = new URLSearchParams();
   if (params?.cursor) sp.set("cursor", params.cursor);
   if (params?.limit) sp.set("limit", String(params.limit));
+  if (params?.category) sp.set("category", params.category);
+  if (params?.read !== undefined) sp.set("read", String(params.read));
   const q = sp.toString();
   return apiGet<{
     success: boolean;
