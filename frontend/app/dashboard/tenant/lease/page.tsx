@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
   Home,
@@ -18,11 +18,19 @@ import {
   Mail,
   Clock,
   X,
+  Briefcase,
+  AlertCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { DashboardHeader } from "@/components/dashboard-header";
-import { leaseDetails } from "@/lib/mockData/leaseData";
+import { leaseDetails, tenantDealId } from "@/lib/mockData/leaseData";
+import {
+  searchEmployers,
+  updateDealRepayment,
+  type RepaymentMethod,
+  type EmployerSearchResult,
+} from "@/lib/employersApi";
 import {
   leaseAgreement,
   propertyInspectionReport,
@@ -30,7 +38,23 @@ import {
   houseRules,
 } from "@/lib/mockData/documents";
 
+const DEDUCTION_DAYS = Array.from({ length: 28 }, (_, i) => i + 1);
+
 export default function TenantLeasePage() {
+  const [repaymentMethod, setRepaymentMethod] =
+    useState<RepaymentMethod>("self_pay");
+  const [employerQuery, setEmployerQuery] = useState("");
+  const [employerResults, setEmployerResults] = useState<
+    EmployerSearchResult[]
+  >([]);
+  const [selectedEmployer, setSelectedEmployer] =
+    useState<EmployerSearchResult | null>(null);
+  const [employeeId, setEmployeeId] = useState("");
+  const [deductionDay, setDeductionDay] = useState(25);
+  const [repaymentSaving, setRepaymentSaving] = useState(false);
+  const [repaymentError, setRepaymentError] = useState<string | null>(null);
+  const [repaymentSaved, setRepaymentSaved] = useState(false);
+
   const [selectedDocument, setSelectedDocument] = useState<
     | typeof leaseAgreement
     | typeof propertyInspectionReport
@@ -38,6 +62,41 @@ export default function TenantLeasePage() {
     | typeof houseRules
     | null
   >(null);
+
+  useEffect(() => {
+    if (repaymentMethod !== "salary_deduction" || employerQuery.trim().length < 2) {
+      setEmployerResults([]);
+      return;
+    }
+    const timer = setTimeout(() => {
+      searchEmployers(employerQuery)
+        .then(setEmployerResults)
+        .catch(() => setEmployerResults([]));
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [employerQuery, repaymentMethod]);
+
+  const saveRepaymentMethod = useCallback(async () => {
+    setRepaymentSaving(true);
+    setRepaymentError(null);
+    setRepaymentSaved(false);
+    try {
+      await updateDealRepayment(tenantDealId, {
+        repaymentMethod,
+        employerId: selectedEmployer?.id,
+        employeeId: repaymentMethod === "salary_deduction" ? employeeId : undefined,
+        deductionDay:
+          repaymentMethod === "salary_deduction" ? deductionDay : undefined,
+      });
+      setRepaymentSaved(true);
+    } catch (err) {
+      setRepaymentError(
+        err instanceof Error ? err.message : "Failed to save repayment method",
+      );
+    } finally {
+      setRepaymentSaving(false);
+    }
+  }, [repaymentMethod, selectedEmployer, employeeId, deductionDay]);
 
   const formatCurrency = (amount: number) => {
     return new Intl.NumberFormat("en-NG", {
@@ -246,6 +305,155 @@ export default function TenantLeasePage() {
                     </span>
                   </div>
                 </div>
+              </Card>
+
+              {/* Repayment Method */}
+              <Card className="border-3 border-foreground p-6 shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
+                <h3 className="mb-4 flex items-center gap-2 text-lg font-bold">
+                  <Briefcase className="h-5 w-5" />
+                  Repayment Method
+                </h3>
+                <div className="flex flex-wrap gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setRepaymentMethod("self_pay")}
+                    className={`border-3 border-foreground px-4 py-2 font-bold transition-all ${
+                      repaymentMethod === "self_pay"
+                        ? "bg-primary shadow-[3px_3px_0px_0px_rgba(26,26,26,1)]"
+                        : "bg-card hover:bg-muted"
+                    }`}
+                  >
+                    Pay myself
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRepaymentMethod("salary_deduction")}
+                    className={`border-3 border-foreground px-4 py-2 font-bold transition-all ${
+                      repaymentMethod === "salary_deduction"
+                        ? "bg-primary shadow-[3px_3px_0px_0px_rgba(26,26,26,1)]"
+                        : "bg-card hover:bg-muted"
+                    }`}
+                  >
+                    Salary deduction
+                  </button>
+                </div>
+
+                {repaymentMethod === "salary_deduction" && (
+                  <div className="mt-6 space-y-4">
+                    <div>
+                      <label
+                        htmlFor="employer-search"
+                        className="mb-1 block text-sm font-bold"
+                      >
+                        Employer
+                      </label>
+                      <input
+                        id="employer-search"
+                        type="text"
+                        value={employerQuery}
+                        onChange={(e) => {
+                          setEmployerQuery(e.target.value);
+                          setSelectedEmployer(null);
+                        }}
+                        placeholder="Search by company name"
+                        className="w-full border-3 border-foreground bg-background px-3 py-2 font-medium"
+                      />
+                      {employerResults.length > 0 && !selectedEmployer && (
+                        <ul className="mt-2 border-3 border-foreground bg-card">
+                          {employerResults.map((emp) => (
+                            <li key={emp.id}>
+                              <button
+                                type="button"
+                                className="w-full px-3 py-2 text-left font-bold hover:bg-muted"
+                                onClick={() => {
+                                  setSelectedEmployer(emp);
+                                  setEmployerQuery(emp.name);
+                                  setEmployerResults([]);
+                                }}
+                              >
+                                {emp.name}
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                    <div>
+                      <label
+                        htmlFor="employee-id"
+                        className="mb-1 block text-sm font-bold"
+                      >
+                        Employee ID (payroll)
+                      </label>
+                      <input
+                        id="employee-id"
+                        type="text"
+                        value={employeeId}
+                        onChange={(e) => setEmployeeId(e.target.value)}
+                        placeholder="Your ID at this employer"
+                        className="w-full border-3 border-foreground bg-background px-3 py-2 font-medium"
+                      />
+                    </div>
+                    <div>
+                      <label
+                        htmlFor="deduction-day"
+                        className="mb-1 block text-sm font-bold"
+                      >
+                        Deduction day of month
+                      </label>
+                      <select
+                        id="deduction-day"
+                        value={deductionDay}
+                        onChange={(e) =>
+                          setDeductionDay(Number(e.target.value))
+                        }
+                        className="w-full border-3 border-foreground bg-background px-3 py-2 font-bold"
+                      >
+                        {DEDUCTION_DAYS.map((day) => (
+                          <option key={day} value={day}>
+                            Day {day}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <p className="border-l-4 border-primary pl-3 text-sm text-muted-foreground">
+                      Your employer will be notified to deduct{" "}
+                      <span className="font-bold text-foreground">
+                        {formatCurrency(leaseDetails.lease.monthlyPayment)}
+                      </span>{" "}
+                      on day{" "}
+                      <span className="font-bold text-foreground">
+                        {deductionDay}
+                      </span>{" "}
+                      of each month.
+                    </p>
+                  </div>
+                )}
+
+                {repaymentError && (
+                  <p className="mt-4 flex items-center gap-2 text-sm font-bold text-destructive">
+                    <AlertCircle className="h-4 w-4" />
+                    {repaymentError}
+                  </p>
+                )}
+                {repaymentSaved && (
+                  <p className="mt-4 flex items-center gap-2 text-sm font-bold text-primary">
+                    <CheckCircle className="h-4 w-4" />
+                    Repayment preferences saved.
+                  </p>
+                )}
+
+                <Button
+                  className="mt-4 border-2 border-foreground bg-secondary font-bold shadow-[3px_3px_0px_0px_rgba(26,26,26,1)]"
+                  disabled={
+                    repaymentSaving ||
+                    (repaymentMethod === "salary_deduction" &&
+                      (!selectedEmployer || !employeeId.trim()))
+                  }
+                  onClick={() => void saveRepaymentMethod()}
+                >
+                  {repaymentSaving ? "Saving…" : "Save repayment method"}
+                </Button>
               </Card>
 
               {/* Documents */}
