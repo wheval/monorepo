@@ -1,3 +1,7 @@
+/** Active deal ID for repayment method API (set via env in deployed environments). */
+export const tenantDealId =
+  process.env.NEXT_PUBLIC_TENANT_DEAL_ID ?? "00000000-0000-4000-8000-000000000001";
+
 export const leaseDetails = {
   property: {
     title: "Modern 3 Bedroom Flat",
