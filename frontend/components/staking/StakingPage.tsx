@@ -1,38 +1,45 @@
 "use client";
 
-import { claimRewards, getStakingPosition, stakeTokens, StakingPositionReponse, unstakeTokens, stakeFromNgnBalance } from "@/lib/config";
+import {
+  claimRewards,
+  getStakingPosition,
+  stakeTokens,
+  StakingPositionReponse,
+  unstakeTokens,
+  stakeFromNgnBalance,
+} from "@/lib/config";
 import { getNgnBalance, type NgnBalanceResponse } from "@/lib/walletApi";
 import React, { useEffect, useState } from "react";
-import Link from "next/link";
 import { Button } from "../ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../ui/card";
-import { Input } from "../ui/input";
-import { Label } from "../ui/label";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
-import { Loader2, Wallet, Coins, AlertCircle, DollarSign } from "lucide-react";
+import { Loader2, Wallet, AlertCircle, Clock, Lock } from "lucide-react";
 import { useRiskState } from "@/hooks/useRiskState";
 import { ACCOUNT_FROZEN_MESSAGE, isAccountFrozenError } from "@/lib/api";
 import { handleError } from "@/lib/toast";
 import FrozenAccountBanner from "../FrozenAccountBanner";
-import { getQuote, type Quote, type StakingPosition as NgnStakingPosition } from "@/lib/ngnStakingApi";
-import { NgnStakingFlow } from "./ngn-flow/NgnStakingFlow";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../ui/tooltip";
-import { Progress } from "../ui/progress";
-import { Info } from "lucide-react";
+import { getQuote, type Quote } from "@/lib/ngnStakingApi";
 import { UnstakeModal } from "./unstake-modal";
+import { PositionCard, formatUsdc } from "./PositionCard";
+import { StakeForm } from "./StakeForm";
+import { HistoryTable } from "./HistoryTable";
+import { stellarWallet } from "@/lib/stellar-wallet";
+import { walletAuthManager } from "@/lib/wallet-auth";
+import { useCountdown } from "@/hooks/useCountdown";
 
 type StakingMode = "ngn_deposit" | "ngn_balance" | "usdc";
 
 export default function StakingPage() {
   const { isFrozen, freezeReason } = useRiskState();
+  const [walletAddress, setWalletAddress] = useState<string | null>(null);
   const [stakingPosition, setStakingPosition] = useState<StakingPositionReponse | null>(null);
   const [ngnBalance, setNgnBalance] = useState<NgnBalanceResponse | null>(null);
   const [stakingMode, setStakingMode] = useState<StakingMode>("ngn_balance");
   const [stakeAmount, setStakeAmount] = useState("");
-  const [unstakeAmount, setUnstakeAmount] = useState("");
   const [status, setStatus] = useState("");
   const [isLoadingBalance, setIsLoadingBalance] = useState(false);
   const [isStaking, setIsStaking] = useState(false);
+  const [isClaiming, setIsClaiming] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(false);
 
   // NGN Deposit flow state
   const [ngnDepositAmount, setNgnDepositAmount] = useState("");
@@ -42,20 +49,36 @@ export default function StakingPage() {
   const [showNgnFlow, setShowNgnFlow] = useState(false);
   const [isUnstakeModalOpen, setIsUnstakeModalOpen] = useState(false);
 
+  // Initialize and check wallet connection
   useEffect(() => {
-    if (!process.env.NEXT_PUBLIC_BACKEND_URL) {
+    const session = walletAuthManager.getSession();
+    if (session?.publicKey) {
+      setWalletAddress(session.publicKey);
+      if (!stellarWallet.getPublicKey()) {
+        stellarWallet.connect().catch((err) => {
+          console.warn("Freighter auto-connect failed:", err);
+        });
+      }
+    } else if (stellarWallet.isConnected()) {
+      setWalletAddress(stellarWallet.getPublicKey());
+    }
+  }, []);
+
+  // Fetch position & balance when walletAddress changes
+  useEffect(() => {
+    if (!walletAddress || !process.env.NEXT_PUBLIC_BACKEND_URL) {
       return;
     }
 
-    getStakingPosition()
+    getStakingPosition(walletAddress)
       .then((data) => setStakingPosition(data))
       .catch((err: Error) => {
         console.error("Failed to fetch staking position", err);
       });
-  }, []);
+  }, [walletAddress]);
 
   useEffect(() => {
-    if (stakingMode === "ngn_balance") {
+    if (walletAddress && stakingMode === "ngn_balance") {
       setIsLoadingBalance(true);
       getNgnBalance()
         .then((balance) => setNgnBalance(balance))
@@ -65,48 +88,36 @@ export default function StakingPage() {
         })
         .finally(() => setIsLoadingBalance(false));
     }
-  }, [stakingMode]);
+  }, [walletAddress, stakingMode]);
 
+  // Lock expiry countdown using custom hook
+  const { timeLeft, formatTime, isExpired } = useCountdown(stakingPosition?.position?.lockExpiry);
 
+  const handleConnectWallet = async () => {
+    setIsConnecting(true);
+    setStatus("");
+    try {
+      const walletInfo = await stellarWallet.connect();
+      setWalletAddress(walletInfo.publicKey);
+      setStatus("Wallet connected successfully!");
+      
+      const pos = await getStakingPosition(walletInfo.publicKey);
+      setStakingPosition(pos);
+    } catch (err: any) {
+      setStatus(err.message || "Failed to connect Stellar wallet");
+      handleError(err, "Failed to connect Stellar wallet");
+    } finally {
+      setIsConnecting(false);
+    }
+  };
 
-
-
-  //  This function handles balance state in the staking page
-  const updatePosition = (updates: {
-    stakedDelta?: number
-    claimableDelta?: number
-  }) => {
-    setStakingPosition((prev) => {
-      if (!prev) return prev
-
-      const currentStaked = Number(prev.position.staked)
-      const currentClaimable = Number(prev.position.claimable)
-
-      return {
-        ...prev,
-        position: {
-          staked: (
-            currentStaked + (updates.stakedDelta ?? 0)
-          ).toFixed(6),
-          claimable: (
-            currentClaimable + (updates.claimableDelta ?? 0)
-          ).toFixed(6),
-        },
-      }
-    })
-  }
-
-
-
-
-  // Function to stake token
   const handleStake = async () => {
     if (!stakeAmount || Number(stakeAmount) <= 0) {
-      setStatus("Enter a valid amount to stake")
-      return
+      setStatus("Enter a valid amount to stake");
+      return;
     }
 
-    const amount = Number(stakeAmount)
+    const amount = Number(stakeAmount);
 
     if (isFrozen && stakingMode === "ngn_balance") {
       setStatus(ACCOUNT_FROZEN_MESSAGE);
@@ -114,48 +125,45 @@ export default function StakingPage() {
       return;
     }
 
-    // Validate NGN balance if staking from NGN
     if (stakingMode === "ngn_balance") {
       if (!ngnBalance || amount > ngnBalance.availableNgn) {
-        setStatus(`Insufficient NGN balance. Available: ₦${ngnBalance?.availableNgn.toLocaleString() || 0}`)
-        return
+        setStatus(`Insufficient NGN balance. Available: ₦${ngnBalance?.availableNgn.toLocaleString() || 0}`);
+        return;
       }
     }
 
-    setIsStaking(true)
-    setStatus("")
+    setIsStaking(true);
+    setStatus("");
 
     try {
       if (stakingMode === "ngn_balance") {
-        setStatus("Converting NGN to USDC and staking...")
-        const res = await stakeFromNgnBalance(amount)
+        setStatus("Converting NGN to USDC and staking...");
+        const res = await stakeFromNgnBalance(amount);
 
         if (res.status === "CONFIRMED") {
-          setStatus(`Successfully staked ${res.amountUsdc || amount} USDC from ₦${amount.toLocaleString()}`)
-          // Refresh NGN balance
-          const updatedBalance = await getNgnBalance()
-          setNgnBalance(updatedBalance)
-          // Refresh staking position
-          const updatedPosition = await getStakingPosition()
-          setStakingPosition(updatedPosition)
+          setStatus(`Successfully staked ${res.amountUsdc || amount} USDC from ₦${amount.toLocaleString()}`);
+          const updatedBalance = await getNgnBalance();
+          setNgnBalance(updatedBalance);
+          const updatedPosition = await getStakingPosition(walletAddress);
+          setStakingPosition(updatedPosition);
         } else {
-          setStatus("Staking queued for processing")
+          setStatus("Staking queued for processing");
         }
 
-        setStakeAmount("")
+        setStakeAmount("");
       } else {
-        setStatus("Submitting stake transaction...")
-        const res = await stakeTokens(stakeAmount)
+        setStatus("Submitting stake transaction...");
+        const res = await stakeTokens(stakeAmount, walletAddress);
 
         if (res.status === "CONFIRMED") {
-          setStatus("Stake confirmed on-chain")
+          setStatus("Stake confirmed on-chain");
         } else {
-          setStatus("Stake queued for retry")
+          setStatus("Stake queued for retry");
         }
 
-        // Add to staked balance
-        updatePosition({ stakedDelta: amount })
-        setStakeAmount("")
+        const updatedPosition = await getStakingPosition(walletAddress);
+        setStakingPosition(updatedPosition);
+        setStakeAmount("");
       }
     } catch (err: any) {
       if (isAccountFrozenError(err)) {
@@ -165,91 +173,57 @@ export default function StakingPage() {
       }
       handleError(err, "Stake failed");
     } finally {
-      setIsStaking(false)
+      setIsStaking(false);
     }
-  }
+  };
 
-
-
-  //  Function to unstake token
   const handleUnstake = async (amountToUnstake: string) => {
-    const amount = Number(amountToUnstake)
+    const amount = Number(amountToUnstake);
     if (isNaN(amount) || amount <= 0) return;
 
     try {
-      setStatus("Submitting unstake transaction...")
+      setStatus("Submitting unstake transaction...");
 
-      const res = await unstakeTokens(unstakeAmount)
+      const res = await unstakeTokens(amountToUnstake, walletAddress);
 
       if (res.status === "CONFIRMED") {
-        setStatus("Unstake confirmed on-chain")
+        setStatus("Unstake confirmed on-chain");
       } else {
-        setStatus("Unstake queued for retry")
+        setStatus("Unstake queued for retry");
       }
 
-      // Subtract from staked
-      updatePosition({ stakedDelta: -amount })
+      const updatedPosition = await getStakingPosition(walletAddress);
+      setStakingPosition(updatedPosition);
 
     } catch (err: any) {
       setStatus(err.message || "Unstake failed");
       handleError(err, "Unstake failed");
-      throw err; // Re-throw to show in modal error boundary if needed
+      throw err;
     }
-  }
+  };
 
-
-
-  //  Function to claim token
   const handleClaim = async () => {
+    setIsClaiming(true);
+    setStatus("Claiming rewards...");
     try {
-      setStatus("Claiming rewards...")
-
-      const claimable = Number(stakingPosition?.position.claimable ?? 0)
-
-      const res = await claimRewards()
+      const res = await claimRewards(walletAddress);
 
       if (res.status === "CONFIRMED") {
-        setStatus("Rewards claimed")
+        setStatus("Rewards claimed");
       } else {
-        setStatus("Claim queued for retry")
+        setStatus("Claim queued for retry");
       }
 
-      // Remove claimable rewards
-      updatePosition({ claimableDelta: -claimable })
+      const updatedPosition = await getStakingPosition(walletAddress);
+      setStakingPosition(updatedPosition);
 
     } catch (err: any) {
       setStatus(err.message || "Claim failed");
       handleError(err, "Claim failed");
+    } finally {
+      setIsClaiming(false);
     }
-  }
-
-
-  const handleStakeInput = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const { value } = e.target;
-
-    // Allow empty string to let user clear input
-    if (value === '' || !isNaN(Number(value))) {
-      setStakeAmount(value);
-    }
-  }
-
-
-  const handleUnstakeInput = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const { value } = e.target;
-
-    // Allow empty string to let user clear input
-    if (value === '' || !isNaN(Number(value))) {
-      setUnstakeAmount(value);
-    }
-  }
-
-  const handleNgnDepositInput = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const { value } = e.target;
-    if (value === '' || !isNaN(Number(value))) {
-      setNgnDepositAmount(value);
-      setQuoteError(null);
-    }
-  }
+  };
 
   const handleGetQuote = async () => {
     const amount = Number(ngnDepositAmount);
@@ -270,442 +244,241 @@ export default function StakingPage() {
     } finally {
       setIsLoadingQuote(false);
     }
-  }
+  };
 
-  const handleNgnFlowComplete = (position: NgnStakingPosition) => {
-    // Refresh staking position
-    getStakingPosition()
+  const handleNgnFlowComplete = (position: any) => {
+    getStakingPosition(walletAddress)
       .then((data) => setStakingPosition(data))
       .catch((err: Error) => {
         console.error("Failed to refresh staking position", err);
       });
 
-    // Reset flow
     setShowNgnFlow(false);
     setNgnQuote(null);
     setNgnDepositAmount("");
-    setStatus(`Successfully staked ${position.amount} USDC`);
-  }
+    setStatus(`Successfully staked ${position.amount || ""} USDC`);
+  };
 
   const handleNgnFlowCancel = () => {
     setShowNgnFlow(false);
     setNgnQuote(null);
-  }
-
-
-
-
-  const formatNgn = (amount: number) => {
-    return new Intl.NumberFormat("en-NG", {
-      style: "currency",
-      currency: "NGN",
-      minimumFractionDigits: 0,
-    }).format(amount);
   };
-
 
   const deficit = ngnBalance ? Math.max(0, -ngnBalance.totalNgn) : 0;
 
-  let ngnBalanceTabContent: React.ReactNode;
-  if (isFrozen) {
-    ngnBalanceTabContent = (
-      <div className="rounded-md border border-destructive/30 bg-destructive/10 p-4">
-        <p className="font-semibold text-destructive">{ACCOUNT_FROZEN_MESSAGE}</p>
-        <p className="mt-1 text-sm text-destructive">
-          Top up NGN wallet to repay deficit
-        </p>
-        <Button asChild className="mt-3 border-2 border-foreground bg-primary font-bold">
-          <Link href="/wallet">Go to wallet</Link>
-        </Button>
-      </div>
-    );
-  } else if (isLoadingBalance) {
-    ngnBalanceTabContent = (
-      <div className="flex items-center justify-center py-8">
-        <Loader2 className="h-6 w-6 animate-spin" />
-      </div>
-    );
-  } else if (ngnBalance) {
-    ngnBalanceTabContent = (
-      <>
-        <div className="rounded-md border-2 border-foreground/20 bg-muted p-3">
-          <div className="flex items-center justify-between">
-            <span className="text-sm text-muted-foreground">Available NGN Balance</span>
-            <span className="font-mono font-bold">{formatNgn(ngnBalance.availableNgn)}</span>
-          </div>
-          {ngnBalance.heldNgn > 0 && (
-            <div className="flex items-center justify-between mt-2">
-              <span className="text-sm text-muted-foreground">Held (Pending)</span>
-              <span className="font-mono text-sm">{formatNgn(ngnBalance.heldNgn)}</span>
-            </div>
-          )}
-        </div>
-
-        <div className="space-y-2">
-          <Label htmlFor="stake-ngn-amount">Amount (NGN)</Label>
-          <Input
-            id="stake-ngn-amount"
-            type="number"
-            placeholder="Enter amount in NGN"
-            value={stakeAmount}
-            onChange={handleStakeInput}
-            min={100}
-            max={ngnBalance.availableNgn}
-            className="border-2 border-foreground"
-            disabled={isStaking}
-          />
-          <p className="text-xs text-muted-foreground">
-            Min: ₦100 · Max: {formatNgn(ngnBalance.availableNgn)}
+  return (
+    <div className="max-w-6xl mx-auto p-4 sm:p-6 space-y-6">
+      
+      {/* Dashboard Title */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between border-b border-foreground/5 pb-4">
+        <div>
+          <h1 className="text-2xl sm:text-3xl font-black tracking-tight text-foreground">Staking Dashboard</h1>
+          <p className="text-sm text-muted-foreground mt-1">
+            Provide liquidity, secure NGN trade finance, and earn compounded rewards
           </p>
         </div>
-
-        {status && (
-          <div
-            className={`flex items-start gap-2 rounded-md border p-3 text-sm ${status.includes("Failed") || status.includes("Insufficient")
-              ? "border-destructive/20 bg-destructive/10 text-destructive"
-              : "border-blue-200 bg-blue-50 text-blue-800"
-              }`}
-          >
-            <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
-            <span>{status}</span>
+        {walletAddress && (
+          <div className="mt-3 sm:mt-0 flex items-center gap-2 border border-foreground/10 bg-muted/40 px-3 py-1.5 rounded-full text-xs font-mono text-muted-foreground w-fit">
+            <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+            Connected: {walletAddress.slice(0, 6)}...{walletAddress.slice(-6)}
           </div>
         )}
-
-        <Button
-          onClick={handleStake}
-          disabled={isStaking || !stakeAmount || Number(stakeAmount) <= 0}
-          className="w-full border-3 border-foreground bg-primary font-bold shadow-[4px_4px_0px_0px_rgba(26,26,26,1)] transition-all hover:translate-x-0.5 hover:translate-y-0.5 hover:shadow-[2px_2px_0px_0px_rgba(26,26,26,1)] disabled:opacity-50"
-        >
-          {isStaking ? (
-            <>
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              Processing...
-            </>
-          ) : (
-            "Stake from NGN Balance"
-          )}
-        </Button>
-      </>
-    );
-  } else {
-    ngnBalanceTabContent = (
-      <div className="flex flex-col items-center justify-center py-8 text-center">
-        <AlertCircle className="h-8 w-8 text-muted-foreground mb-2" />
-        <p className="text-sm text-muted-foreground">Failed to load NGN balance</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="max-w-4xl mx-auto p-6 relative ">
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold mb-2">Staking Dashboard</h1>
-        <p className="text-sm text-muted-foreground">
-          Stake your tokens to earn rewards
-        </p>
       </div>
 
       {isFrozen && (
-        <div className="mb-6">
-          <FrozenAccountBanner
-            freezeReason={freezeReason}
-            deficit={deficit}
-            ctaHref="/wallet"
-            ctaLabel="Top up NGN wallet to repay deficit"
+        <FrozenAccountBanner
+          freezeReason={freezeReason}
+          deficit={deficit}
+          ctaHref="/wallet"
+          ctaLabel="Top up NGN wallet to repay deficit"
+        />
+      )}
+
+      {/* WALLET CONNECTION CHECK GATE CARD */}
+      {!walletAddress ? (
+        <Card className="max-w-md mx-auto border-3 border-foreground bg-card shadow-[6px_6px_0px_0px_rgba(26,26,26,1)] overflow-hidden rounded-2xl my-8">
+          <CardHeader className="bg-gradient-to-r from-primary/5 via-transparent to-transparent text-center border-b-2 border-foreground/10 pb-6">
+            <div className="mx-auto rounded-full bg-primary/10 p-4 w-fit border border-primary/20 mb-4 animate-bounce">
+              <Wallet className="h-8 w-8 text-primary" />
+            </div>
+            <CardTitle className="text-xl font-black">Connect Stellar Wallet</CardTitle>
+            <CardDescription className="text-xs mt-1 leading-relaxed">
+              Link your Freighter wallet to query lock balances, stake digital assets, and claim contract interest.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="p-6 space-y-4">
+            {status && (
+              <div className="flex items-start gap-2 rounded-xl border border-destructive/20 bg-destructive/5 p-4 text-xs text-destructive">
+                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                <span>{status}</span>
+              </div>
+            )}
+            
+            <Button
+              onClick={handleConnectWallet}
+              disabled={isConnecting}
+              className="w-full h-11 border-2 border-primary bg-primary text-primary-foreground font-bold shadow-sm hover:shadow-md hover:scale-[1.01] active:scale-[0.99] transition-all rounded-xl"
+            >
+              {isConnecting ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Connecting Freighter...
+                </>
+              ) : (
+                <>
+                  <Wallet className="mr-2 h-4 w-4" />
+                  Connect Freighter Wallet
+                </>
+              )}
+            </Button>
+
+            <div className="text-[10px] text-muted-foreground text-center leading-relaxed">
+              Stellar ledger operations require freighter web browser extension.
+            </div>
+          </CardContent>
+        </Card>
+      ) : (
+        /* STAKING DASHBOARD BODY (AUTHORIZED STATE) */
+        <div className="space-y-6">
+          
+          {/* Hero Stats */}
+          <PositionCard position={stakingPosition?.position || null} />
+
+          {/* Action grid (Stake / Unstake / Claim) */}
+          <div className="grid gap-6 md:grid-cols-12">
+            
+            {/* Stake Form */}
+            <div className="md:col-span-8">
+              <StakeForm
+                isFrozen={isFrozen}
+                isLoadingBalance={isLoadingBalance}
+                isStaking={isStaking}
+                ngnBalance={ngnBalance}
+                stakeAmount={stakeAmount}
+                setStakeAmount={setStakeAmount}
+                handleStake={handleStake}
+                stakingMode={stakingMode}
+                setStakingMode={setStakingMode}
+                status={status}
+                setStatus={setStatus}
+                ngnDepositAmount={ngnDepositAmount}
+                setNgnDepositAmount={setNgnDepositAmount}
+                ngnQuote={ngnQuote}
+                setNgnQuote={setNgnQuote}
+                isLoadingQuote={isLoadingQuote}
+                setIsLoadingQuote={setIsLoadingQuote}
+                quoteError={quoteError}
+                setQuoteError={setQuoteError}
+                showNgnFlow={showNgnFlow}
+                setShowNgnFlow={setShowNgnFlow}
+                handleGetQuote={handleGetQuote}
+                handleNgnFlowComplete={handleNgnFlowComplete}
+                handleNgnFlowCancel={handleNgnFlowCancel}
+              />
+            </div>
+
+            {/* Unstake & Claim Panel */}
+            <div className="md:col-span-4 space-y-6">
+              
+              {/* Unstake Panel */}
+              <Card className="border-2 border-foreground/10 bg-card shadow-sm hover:shadow-md transition-all duration-300 overflow-hidden">
+                <CardHeader className="bg-muted/10 pb-4 border-b border-foreground/5">
+                  <div className="flex items-center gap-2">
+                    <Clock className="h-5 w-5 text-primary" />
+                    <CardTitle className="text-base font-bold text-foreground">Unstake Tokens</CardTitle>
+                  </div>
+                  <CardDescription className="text-xs">
+                    Reclaim staked USDC to your wallet balance
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="p-5 space-y-4">
+                  <p className="text-xs text-muted-foreground leading-relaxed">
+                    Staked principal is subject to smart contract locks. Unstaking takes up to 7 days of cooling time before funds become available.
+                  </p>
+
+                  {/* Lock period expiration indicator */}
+                  {!isExpired && (
+                    <div className="flex items-center gap-2 rounded-xl border border-amber-500/20 bg-amber-500/5 p-3.5 text-xs text-amber-600 dark:text-amber-500">
+                      <Lock className="h-4 w-4 shrink-0" />
+                      <div className="space-y-0.5">
+                        <span className="font-bold">Staking locked</span>
+                        <p className="text-[10px] text-muted-foreground font-mono">
+                          Unlocks in: {formatTime()}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  <Button
+                    onClick={() => setIsUnstakeModalOpen(true)}
+                    disabled={!isExpired || !stakingPosition || Number(stakingPosition.position.staked) <= 0}
+                    className={`w-full h-10 border-2 text-xs font-bold rounded-xl shadow-sm hover:shadow transition-all ${
+                      isExpired
+                        ? "border-destructive bg-destructive text-destructive-foreground"
+                        : "border-muted bg-muted text-muted-foreground cursor-not-allowed"
+                    }`}
+                  >
+                    {!isExpired ? (
+                      <span className="flex items-center justify-center gap-1.5">
+                        <Lock className="h-3.5 w-3.5" /> Unstake Locked ({formatTime()})
+                      </span>
+                    ) : (
+                      "Unstake principal"
+                    )}
+                  </Button>
+                </CardContent>
+              </Card>
+
+              {/* Claim Rewards */}
+              <Card className="border-2 border-foreground/10 bg-card shadow-sm hover:shadow-md transition-all duration-300 overflow-hidden">
+                <CardHeader className="bg-muted/10 pb-4 border-b border-foreground/5">
+                  <div className="flex items-center gap-2">
+                    <Lock className="h-5 w-5 text-emerald-500" />
+                    <CardTitle className="text-base font-bold text-foreground">Claim Interest</CardTitle>
+                  </div>
+                  <CardDescription className="text-xs">
+                    Claim dynamically generated USDC interest yield
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="p-5 space-y-4">
+                  <div className="rounded-xl border border-foreground/5 bg-muted/30 p-3.5 flex items-center justify-between">
+                    <span className="text-xs text-muted-foreground font-medium">Available Interest</span>
+                    <span className="font-mono text-sm font-black text-emerald-600 dark:text-emerald-500">
+                      {stakingPosition ? formatUsdc(stakingPosition.position.claimable) : "0.000000"} USDC
+                    </span>
+                  </div>
+
+                  <Button
+                    onClick={handleClaim}
+                    disabled={isClaiming || !stakingPosition || Number(stakingPosition.position.claimable) <= 0}
+                    className="w-full h-10 border-2 border-primary bg-primary text-primary-foreground text-xs font-bold rounded-xl shadow-sm hover:shadow transition-all disabled:opacity-50"
+                  >
+                    {isClaiming ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Claiming yield...
+                      </>
+                    ) : (
+                      "Claim accrued yield"
+                    )}
+                  </Button>
+                </CardContent>
+              </Card>
+            </div>
+          </div>
+
+          {/* History table */}
+          <HistoryTable walletAddress={walletAddress} />
+
+          <UnstakeModal
+            isOpen={isUnstakeModalOpen}
+            onClose={() => setIsUnstakeModalOpen(false)}
+            onConfirm={handleUnstake}
+            maxAmount={stakingPosition ? Number(stakingPosition.position.staked).toFixed(6) : "0.000000"}
+            warmingAmount={stakingPosition ? Number(stakingPosition.position.warming).toFixed(6) : "0.000000"}
           />
         </div>
       )}
-
-      {/* Staking Position Cards */}
-      <div className="grid gap-4 md:grid-cols-2 mb-6">
-        <Card className="border-3 border-foreground shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
-          <CardHeader className="pb-2">
-            <CardDescription>Staked Balance</CardDescription>
-            <CardTitle className="font-mono text-2xl">
-              {stakingPosition ? (
-                `${Number(stakingPosition.position.staked).toFixed(2)} USDC`
-              ) : (
-                "—"
-              )}
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="pt-0">
-            <p className="text-xs text-muted-foreground">Currently staked</p>
-          </CardContent>
-        </Card>
-
-        <Card className="border-3 border-foreground shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
-          <CardHeader className="pb-2">
-            <CardDescription>Claimable Rewards</CardDescription>
-            <CardTitle className="font-mono text-2xl text-primary">
-              {stakingPosition ? (
-                `${Number(stakingPosition.position.claimable).toFixed(2)} USDC`
-              ) : (
-                "—"
-              )}
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="pt-0">
-            <p className="text-xs text-muted-foreground">Available to claim</p>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Stake Composition */}
-      <Card className="mb-6 border-3 border-foreground shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
-        <CardHeader className="pb-2">
-          <div className="flex items-center justify-between">
-            <CardTitle className="text-lg">Stake Composition</CardTitle>
-            <TooltipProvider>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button variant="ghost" size="icon" className="h-6 w-6">
-                    <Info className="h-4 w-4" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent className="border-2 border-foreground bg-card p-3 shadow-[2px_2px_0px_0px_rgba(26,26,26,1)]">
-                  <div className="space-y-2 text-xs">
-                    <p><strong>Active:</strong> Fully staked and earning rewards.</p>
-                    <p><strong>Warming:</strong> Recently staked, waiting to become active.</p>
-                    <p><strong>Cooling:</strong> Unstaking in progress, waiting for withdrawal.</p>
-                  </div>
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
-          </div>
-          <CardDescription>Breakdown of your staked USDC</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-6">
-          <div className="space-y-2">
-            <div className="flex font-mono text-sm font-bold">
-              <div 
-                style={{ width: `${stakingPosition ? (Number(stakingPosition.position.staked) / (Number(stakingPosition.position.staked) + Number(stakingPosition.position.warming) + Number(stakingPosition.position.cooling) || 1)) * 100 : 0}%` }}
-                className="h-8 bg-primary border-r-2 border-foreground flex items-center justify-center text-[10px]"
-              >
-                {stakingPosition && Number(stakingPosition.position.staked) > 0 && "ACTIVE"}
-              </div>
-              <div 
-                style={{ width: `${stakingPosition ? (Number(stakingPosition.position.warming) / (Number(stakingPosition.position.staked) + Number(stakingPosition.position.warming) + Number(stakingPosition.position.cooling) || 1)) * 100 : 0}%` }}
-                className="h-8 bg-accent border-r-2 border-foreground flex items-center justify-center text-[10px]"
-              >
-                {stakingPosition && Number(stakingPosition.position.warming) > 0 && "WARMING"}
-              </div>
-              <div 
-                style={{ width: `${stakingPosition ? (Number(stakingPosition.position.cooling) / (Number(stakingPosition.position.staked) + Number(stakingPosition.position.warming) + Number(stakingPosition.position.cooling) || 1)) * 100 : 0}%` }}
-                className="h-8 bg-destructive/30 flex items-center justify-center text-[10px]"
-              >
-                {stakingPosition && Number(stakingPosition.position.cooling) > 0 && "COOLING"}
-              </div>
-            </div>
-            
-            <div className="grid grid-cols-3 gap-2">
-              <div className="border-3 border-foreground bg-primary/20 p-2 shadow-[2px_2px_0px_0px_rgba(26,26,26,1)] text-center">
-                <p className="text-[10px] font-bold uppercase text-muted-foreground uppercase">Active</p>
-                <p className="font-mono text-sm font-bold">{stakingPosition ? Number(stakingPosition.position.staked).toFixed(2) : "0.00"}</p>
-              </div>
-              <div className="border-3 border-foreground bg-accent/20 p-2 shadow-[2px_2px_0px_0px_rgba(26,26,26,1)] text-center">
-                <p className="text-[10px] font-bold uppercase text-muted-foreground uppercase">Warming</p>
-                <p className="font-mono text-sm font-bold">{stakingPosition ? Number(stakingPosition.position.warming).toFixed(2) : "0.00"}</p>
-              </div>
-              <div className="border-3 border-foreground bg-destructive/10 p-2 shadow-[2px_2px_0px_0px_rgba(26,26,26,1)] text-center">
-                <p className="text-[10px] font-bold uppercase text-muted-foreground uppercase">Cooling</p>
-                <p className="font-mono text-sm font-bold">{stakingPosition ? Number(stakingPosition.position.cooling).toFixed(2) : "0.00"}</p>
-              </div>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Staking Mode Toggle */}
-      <Tabs value={stakingMode} onValueChange={(v) => setStakingMode(v as StakingMode)} className="mb-6">
-        <TabsList className="grid w-full grid-cols-3 border-3 border-foreground">
-          <TabsTrigger value="ngn_deposit" className="data-[state=active]:bg-primary">
-            <DollarSign className="h-4 w-4 mr-2" />
-            NGN Deposit
-          </TabsTrigger>
-          <TabsTrigger value="ngn_balance" className="data-[state=active]:bg-primary">
-            <Wallet className="h-4 w-4 mr-2" />
-            NGN Balance
-          </TabsTrigger>
-          <TabsTrigger value="usdc" className="data-[state=active]:bg-primary">
-            <Coins className="h-4 w-4 mr-2" />
-            USDC (Advanced)
-          </TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="ngn_deposit" className="mt-4">
-          {showNgnFlow && ngnQuote ? (
-            <NgnStakingFlow
-              initialQuote={ngnQuote}
-              onComplete={handleNgnFlowComplete}
-              onCancel={handleNgnFlowCancel}
-            />
-          ) : (
-            <Card className="border-3 border-foreground shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
-              <CardHeader>
-                <CardTitle>Stake with NGN Deposit</CardTitle>
-                <CardDescription>
-                  Deposit NGN via bank transfer or Paystack, convert to USDC, and stake
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="space-y-2">
-                  <Label htmlFor="ngn-deposit-amount">Amount (NGN)</Label>
-                  <Input
-                    id="ngn-deposit-amount"
-                    type="number"
-                    placeholder="Enter amount in NGN"
-                    value={ngnDepositAmount}
-                    onChange={handleNgnDepositInput}
-                    min={100}
-                    className="border-2 border-foreground"
-                    disabled={isLoadingQuote}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    Minimum: ₦100
-                  </p>
-                </div>
-
-                {quoteError && (
-                  <div className="flex items-start gap-2 rounded-md border border-destructive/20 bg-destructive/10 p-3 text-sm text-destructive">
-                    <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
-                    <span>{quoteError}</span>
-                  </div>
-                )}
-
-                <Button
-                  onClick={handleGetQuote}
-                  disabled={isLoadingQuote || !ngnDepositAmount || Number(ngnDepositAmount) < 100}
-                  className="w-full border-3 border-foreground bg-primary font-bold shadow-[4px_4px_0px_0px_rgba(26,26,26,1)] transition-all hover:translate-x-0.5 hover:translate-y-0.5 hover:shadow-[2px_2px_0px_0px_rgba(26,26,26,1)] disabled:opacity-50"
-                >
-                  {isLoadingQuote ? (
-                    <>
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      Getting Quote...
-                    </>
-                  ) : (
-                    "Get Quote"
-                  )}
-                </Button>
-              </CardContent>
-            </Card>
-          )}
-        </TabsContent>
-
-        <TabsContent value="ngn_balance" className="mt-4">
-          <Card className="border-3 border-foreground shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
-            <CardHeader>
-              <CardTitle>Stake from NGN Balance</CardTitle>
-              <CardDescription>
-                Convert your NGN wallet balance to USDC and stake it
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {ngnBalanceTabContent}
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        <TabsContent value="usdc" className="mt-4">
-          <Card className="border-3 border-foreground shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
-            <CardHeader>
-              <CardTitle>Stake USDC Directly</CardTitle>
-              <CardDescription>
-                Stake USDC tokens directly (requires USDC in your wallet)
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="space-y-2">
-                <Label htmlFor="stake-usdc-amount">Amount (USDC)</Label>
-                <Input
-                  id="stake-usdc-amount"
-                  type="text"
-                  placeholder="Enter amount in USDC"
-                  value={stakeAmount}
-                  onChange={handleStakeInput}
-                  className="border-2 border-foreground"
-                  disabled={isStaking}
-                />
-                <p className="text-xs text-muted-foreground">
-                  Enter the amount in USDC (e.g., 100.50)
-                </p>
-              </div>
-
-              {status && (
-                <div className={`flex items-start gap-2 rounded-md border p-3 text-sm ${status.includes("Failed") || status.includes("Enter a valid")
-                  ? "border-destructive/20 bg-destructive/10 text-destructive"
-                  : "border-blue-200 bg-blue-50 text-blue-800"
-                  }`}>
-                  <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
-                  <span>{status}</span>
-                </div>
-              )}
-
-              <Button
-                onClick={handleStake}
-                disabled={isStaking || !stakeAmount || Number(stakeAmount) <= 0}
-                className="w-full border-3 border-foreground bg-primary font-bold shadow-[4px_4px_0px_0px_rgba(26,26,26,1)] transition-all hover:translate-x-0.5 hover:translate-y-0.5 hover:shadow-[2px_2px_0px_0px_rgba(26,26,26,1)] disabled:opacity-50"
-              >
-                {isStaking ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Processing...
-                  </>
-                ) : (
-                  "Stake USDC"
-                )}
-              </Button>
-            </CardContent>
-          </Card>
-        </TabsContent>
-      </Tabs>
-
-      {/* Unstake Form */}
-      <Card className="mb-6 border-3 border-foreground shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
-        <CardHeader>
-          <CardTitle>Unstake Tokens</CardTitle>
-          <CardDescription>Unstake your USDC tokens from the staking pool</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <p className="text-sm text-muted-foreground">
-            You can unstake your active USDC at any time. Note that unstaked tokens will enter a cooling period before withdrawal.
-          </p>
-          <Button
-            onClick={() => setIsUnstakeModalOpen(true)}
-            className="w-full border-3 border-foreground bg-destructive text-destructive-foreground font-bold shadow-[4px_4px_0px_0px_rgba(26,26,26,1)] transition-all hover:translate-x-0.5 hover:translate-y-0.5 hover:shadow-[2px_2px_0px_0px_rgba(26,26,26,1)]"
-          >
-            Unstake Tokens
-          </Button>
-        </CardContent>
-      </Card>
-
-      <UnstakeModal
-        isOpen={isUnstakeModalOpen}
-        onClose={() => setIsUnstakeModalOpen(false)}
-        onConfirm={handleUnstake}
-        maxAmount={stakingPosition ? Number(stakingPosition.position.staked).toFixed(2) : "0.00"}
-        warmingAmount={stakingPosition ? Number(stakingPosition.position.warming).toFixed(2) : "0.00"}
-      />
-
-      {/* Claim Rewards */}
-      <Card className="mb-6 border-3 border-foreground shadow-[4px_4px_0px_0px_rgba(26,26,26,1)]">
-        <CardHeader>
-          <CardTitle>Claim Rewards</CardTitle>
-          <CardDescription>
-            Claim your staking rewards ({stakingPosition ? Number(stakingPosition.position.claimable).toFixed(2) : "0"} USDC available)
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <Button
-            onClick={handleClaim}
-            disabled={!stakingPosition || Number(stakingPosition.position.claimable) <= 0}
-            className="w-full border-3 border-foreground bg-primary font-bold shadow-[4px_4px_0px_0px_rgba(26,26,26,1)] transition-all hover:translate-x-0.5 hover:translate-y-0.5 hover:shadow-[2px_2px_0px_0px_rgba(26,26,26,1)] disabled:opacity-50"
-          >
-            Claim Rewards
-          </Button>
-        </CardContent>
-      </Card>
-
     </div>
   );
 }

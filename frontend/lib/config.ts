@@ -14,6 +14,7 @@ export interface StakingPositionReponse {
     claimable: string;
     warming: string;
     cooling: string;
+    lockExpiry?: string;
   }
 }
 
@@ -31,14 +32,23 @@ export function getHealth(): Promise<HealthResponse> {
 }
 
 
-export function getStakingPosition(): Promise<StakingPositionReponse> {
-  return apiFetch<StakingPositionReponse>("/api/staking/position");
+export function getStakingPosition(walletAddress?: string | null): Promise<StakingPositionReponse> {
+  const headers: Record<string, string> = {};
+  if (walletAddress) {
+    headers["x-wallet-address"] = walletAddress;
+  }
+  return apiFetch<StakingPositionReponse>("/api/staking/position", { headers });
 }
 
 
-export function stakeTokens(amountUsdc: string): Promise<TxResponse> {
+export function stakeTokens(amountUsdc: string, walletAddress?: string | null): Promise<TxResponse> {
+  const headers: Record<string, string> = {};
+  if (walletAddress) {
+    headers["x-wallet-address"] = walletAddress;
+  }
   return apiFetch("/api/staking/stake", {
     method: "POST",
+    headers,
     body: JSON.stringify({
       amountUsdc,
       externalRefSource: "web",
@@ -47,9 +57,14 @@ export function stakeTokens(amountUsdc: string): Promise<TxResponse> {
   })
 }
 
-export function unstakeTokens(amountUsdc: string): Promise<TxResponse> {
+export function unstakeTokens(amountUsdc: string, walletAddress?: string | null): Promise<TxResponse> {
+  const headers: Record<string, string> = {};
+  if (walletAddress) {
+    headers["x-wallet-address"] = walletAddress;
+  }
   return apiFetch("/api/staking/unstake", {
     method: "POST",
+    headers,
     body: JSON.stringify({
       amountUsdc,
       externalRefSource: "web",
@@ -58,9 +73,14 @@ export function unstakeTokens(amountUsdc: string): Promise<TxResponse> {
   })
 }
 
-export function claimRewards(): Promise<TxResponse> {
+export function claimRewards(walletAddress?: string | null): Promise<TxResponse> {
+  const headers: Record<string, string> = {};
+  if (walletAddress) {
+    headers["x-wallet-address"] = walletAddress;
+  }
   return apiFetch("/api/staking/claim", {
     method: "POST",
+    headers,
     body: JSON.stringify({
       externalRefSource: "web",
       externalRef: crypto.randomUUID()
@@ -123,4 +143,26 @@ export function stakeNgn(amountNgn: number, externalRefSource: string = "web", e
       externalRef: externalRef || crypto.randomUUID()
     })
   })
+}
+
+export interface StakingHistoryItem {
+  txId: string;
+  txType: "STAKE" | "UNSTAKE" | "STAKE_REWARD_CLAIM";
+  amountUsdc: string | number;
+  amountNgn?: string | number;
+  fxRate?: string | number;
+  indexedAt: string;
+}
+
+export interface StakingHistoryResponse {
+  success: boolean;
+  history: StakingHistoryItem[];
+}
+
+export function getStakingHistory(walletAddress?: string | null): Promise<StakingHistoryResponse> {
+  const headers: Record<string, string> = {};
+  if (walletAddress) {
+    headers["x-wallet-address"] = walletAddress;
+  }
+  return apiFetch<StakingHistoryResponse>("/api/staking/history", { headers });
 }
